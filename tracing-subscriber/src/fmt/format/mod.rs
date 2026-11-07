@@ -45,9 +45,6 @@ use tracing_core::{
 #[cfg(feature = "tracing-log")]
 use tracing_log::NormalizeEvent;
 
-#[cfg(feature = "ansi")]
-use nu_ansi_term::{Color, Style};
-
 mod escape;
 use escape::EscapeGuard;
 
@@ -551,7 +548,7 @@ impl<'writer> Writer<'writer> {
         #[cfg(feature = "ansi")]
         {
             if self.is_ansi {
-                return Style::new().bold();
+                return Style::BOLD;
             }
         }
 
@@ -562,7 +559,7 @@ impl<'writer> Writer<'writer> {
         #[cfg(feature = "ansi")]
         {
             if self.is_ansi {
-                return Style::new().dimmed();
+                return Style::DIMMED;
             }
         }
 
@@ -573,7 +570,7 @@ impl<'writer> Writer<'writer> {
         #[cfg(feature = "ansi")]
         {
             if self.is_ansi {
-                return Style::new().italic();
+                return Style::ITALIC;
             }
         }
 
@@ -854,7 +851,7 @@ impl<F, T> Format<F, T> {
         #[cfg(feature = "ansi")]
         {
             if writer.has_ansi_escapes() {
-                let style = Style::new().dimmed();
+                let style = Style::DIMMED;
                 write!(writer, "{}", style.prefix())?;
 
                 // If getting the timestamp failed, don't bail --- only bail on
@@ -1412,7 +1409,7 @@ where
         #[cfg(feature = "ansi")]
         {
             if self.ansi {
-                return Style::new().bold();
+                return Style::BOLD;
             }
         }
 
@@ -1448,29 +1445,54 @@ where
     }
 }
 
-#[cfg(not(feature = "ansi"))]
-struct Style;
+/// A text style, stored as its precomputed SGR escape sequence.
+///
+/// `nu_ansi_term::Style` builds the escape code digit by digit on every
+/// `paint`, which is measurable on the per-event hot path.
+#[derive(Clone, Copy)]
+struct Style(&'static str);
 
-#[cfg(not(feature = "ansi"))]
 impl Style {
-    fn new() -> Self {
-        Style
+    #[cfg(feature = "ansi")]
+    const BOLD: Self = Style("\x1b[1m");
+    #[cfg(feature = "ansi")]
+    const DIMMED: Self = Style("\x1b[2m");
+    #[cfg(feature = "ansi")]
+    const ITALIC: Self = Style("\x1b[3m");
+
+    const fn new() -> Self {
+        Style("")
     }
 
-    fn bold(self) -> Self {
-        self
+    fn paint<T: fmt::Display>(self, inner: T) -> Painted<T> {
+        Painted { style: self, inner }
     }
 
-    fn paint(&self, d: impl fmt::Display) -> impl fmt::Display {
-        d
+    fn prefix(self) -> &'static str {
+        self.0
     }
 
-    fn prefix(&self) -> impl fmt::Display {
-        ""
+    fn suffix(self) -> &'static str {
+        if self.0.is_empty() {
+            ""
+        } else {
+            ANSI_RESET
+        }
     }
+}
 
-    fn suffix(&self) -> impl fmt::Display {
-        ""
+const ANSI_RESET: &str = "\x1b[0m";
+
+struct Painted<T> {
+    style: Style,
+    inner: T,
+}
+
+impl<T: fmt::Display> fmt::Display for Painted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.style.prefix())?;
+        self.inner.fmt(f)?;
+        f.write_str(self.style.suffix())
     }
 }
 
@@ -1559,11 +1581,11 @@ impl fmt::Display for FmtLevel<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.ansi {
             match *self.level {
-                Level::TRACE => write!(f, "{}", Color::Purple.paint(TRACE_STR)),
-                Level::DEBUG => write!(f, "{}", Color::Blue.paint(DEBUG_STR)),
-                Level::INFO => write!(f, "{}", Color::Green.paint(INFO_STR)),
-                Level::WARN => write!(f, "{}", Color::Yellow.paint(WARN_STR)),
-                Level::ERROR => write!(f, "{}", Color::Red.paint(ERROR_STR)),
+                Level::TRACE => write!(f, "{}", Style("\x1b[35m").paint(TRACE_STR)),
+                Level::DEBUG => write!(f, "{}", Style("\x1b[34m").paint(DEBUG_STR)),
+                Level::INFO => write!(f, "{}", Style("\x1b[32m").paint(INFO_STR)),
+                Level::WARN => write!(f, "{}", Style("\x1b[33m").paint(WARN_STR)),
+                Level::ERROR => write!(f, "{}", Style("\x1b[31m").paint(ERROR_STR)),
             }
         } else {
             match *self.level {
@@ -1831,6 +1853,38 @@ pub(super) mod test {
         #[cfg(feature = "ansi")]
         let subscriber = subscriber.with_ansi(false);
         assert_info_hello(subscriber, make_writer, "hello\n")
+    }
+
+    #[cfg(feature = "ansi")]
+    #[test]
+    fn styles_match_nu_ansi_term() {
+        use nu_ansi_term::{Color, Style as Nu};
+
+        let cases = [
+            (Style::new(), Nu::new()),
+            (Style::BOLD, Nu::new().bold()),
+            (Style::DIMMED, Nu::new().dimmed()),
+            (Style::ITALIC, Nu::new().italic()),
+        ];
+        for (ours, theirs) in cases {
+            assert_eq!(ours.paint("x").to_string(), theirs.paint("x").to_string());
+            assert_eq!(ours.prefix(), theirs.prefix().to_string());
+            assert_eq!(ours.suffix(), theirs.suffix().to_string());
+        }
+
+        let levels = [
+            (Level::TRACE, Color::Purple.paint(TRACE_STR)),
+            (Level::DEBUG, Color::Blue.paint(DEBUG_STR)),
+            (Level::INFO, Color::Green.paint(INFO_STR)),
+            (Level::WARN, Color::Yellow.paint(WARN_STR)),
+            (Level::ERROR, Color::Red.paint(ERROR_STR)),
+        ];
+        for (level, expected) in levels {
+            assert_eq!(
+                FmtLevel::new(&level, true).to_string(),
+                expected.to_string()
+            );
+        }
     }
 
     fn test_ansi<T>(
